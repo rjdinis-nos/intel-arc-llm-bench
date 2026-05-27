@@ -1,0 +1,2 @@
+model,dtype,new_tokens,device,ttft_ms,prefill_tps,decode_tps,overall_tps,error
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,60.5,1405.11,24.8,24.71,
