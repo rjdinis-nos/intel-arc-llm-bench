@@ -51,7 +51,7 @@ NATIVE_PATH := $(abspath .venv/bin):$(PATH)
 .PHONY: help bench bench-quick sweep sweep-quick tokenizer check \
         test test-gpu test-hf test-chat all clean \
         setup-llama bench-llama bench-llama-quick sweep-llama sweep-llama-quick \
-        serve-llama setup-llama-native serve-llama-native
+        setup-llama-server serve-llama
 
 help:
 	@echo "Targets disponíveis:"
@@ -68,19 +68,18 @@ help:
 	@echo "  make all           — check + bench + sweep + tokenizer"
 	@echo "  make clean         — limpa caches e resultados"
 	@echo ""
-	@echo "── llama.cpp (motor alternativo, GGUF quantizado — setup pontual) ──"
+	@echo "── llama.cpp (motor GGUF quantizado) ──"
 	@echo "  Não vem com 'uv sync': não há wheel GPU pré-built, o build SYCL"
 	@echo "  é compilado a partir do código (oneAPI). Corre o setup UMA vez:"
-	@echo "  make setup-llama        — compila p/ Intel Arc GPU (SYCL, requer oneAPI)"
+	@echo "  make setup-llama        — bindings llama-cpp-python p/ benchmarks (SYCL, requer oneAPI)"
 	@echo "  make bench-llama        — benchmark llama.cpp ($(MODEL), quant=$(LLAMA_QUANT))"
 	@echo "  make bench-llama-quick  — benchmark llama.cpp rápido (1 run, 64 tokens)"
 	@echo "  make sweep-llama        — sweep llama.cpp (modelos × quants × sizes)"
 	@echo "  make sweep-llama-quick  — sweep llama.cpp smoke test"
-	@echo "  make serve-llama        — servidor OpenAI-compatível p/ opencode (escolhe modelo)"
 	@echo ""
-	@echo "── llama.cpp NATIVO (llama-server --jinja: tool-calling nativo p/ opencode) ──"
-	@echo "  make setup-llama-native — clona + compila o llama-server (SYCL, requer oneAPI)"
-	@echo "  make serve-llama-native — servidor nativo p/ opencode (tool-calling via --jinja)"
+	@echo "── Servir um modelo ao opencode (llama-server --jinja: tool-calling nativo) ──"
+	@echo "  make setup-llama-server — clona + compila o llama-server (SYCL, requer oneAPI)"
+	@echo "  make serve-llama        — servidor OpenAI-compatível p/ opencode (escolhe modelo)"
 	@echo ""
 	@echo "Variáveis: MODEL DTYPE NEW_TOKENS RUNS WARMUP DEVICE PROMPT_TOKENS LLAMA_QUANT"
 	@echo "  PROMPT_TOKENS=64,256,1024  — adiciona sweep sobre tamanho do prompt/KV-cache"
@@ -145,10 +144,7 @@ setup-llama:
 	$(SYCL_ENV) \
 	CMAKE_ARGS="-DGGML_SYCL=on -DGGML_SYCL_TARGET=INTEL -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx" \
 		uv pip install llama-cpp-python --force-reinstall --no-cache-dir
-	@echo "A instalar extras do servidor (para 'make serve-llama')..."
-	uv pip install "uvicorn>=0.22.0" "fastapi>=0.100.0" "pydantic-settings>=2.0.1" \
-		"sse-starlette>=1.6.1" "starlette-context>=0.3.6,<0.4" "PyYAML>=5.1" "gguf>=0.10.0"
-	@echo "✔  llama-cpp-python instalado (SYCL/GPU)."
+	@echo "✔  llama-cpp-python instalado (SYCL/GPU) — para 'make bench-llama'."
 
 bench-llama:
 	$(SYCL_ENV) $(PY) benchmarks/benchmark_llama.py \
@@ -166,17 +162,9 @@ sweep-llama:
 sweep-llama-quick:
 	$(SYCL_ENV) $(PY) benchmarks/bench_llama_sweep.py --quick
 
-# Servidor OpenAI-compatível na GPU para o opencode (ou qualquer cliente OpenAI).
-# Endpoint: http://$(SERVE_HOST):$(SERVE_PORT)/v1  (apiKey ignorada).
-serve-llama:
-	$(SYCL_ENV) $(PY) benchmarks/serve_llama.py \
-		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
-		--host $(SERVE_HOST) --port $(SERVE_PORT) \
-		--n-ctx $(SERVE_NCTX) --max-ctx $(SERVE_MAX_CTX)
-
-# llama.cpp NATIVO: compila o binário llama-server com o backend SYCL (Intel Arc).
-# Alternativa ao llama-cpp-python; traz tool-calling nativo (--jinja) mais robusto.
-setup-llama-native:
+# Compila o binário llama-server (servidor C++ oficial) com o backend SYCL (Intel
+# Arc). É o servidor usado para servir modelos ao opencode (tool-calling nativo).
+setup-llama-server:
 	@if [ ! -f "$(ONEAPI_ENV)" ]; then \
 		echo "✗ Intel oneAPI não encontrado em $(ONEAPI_ENV)."; \
 		echo "  Instala o Intel oneAPI Base Toolkit (DPC++ + MKL) ou define"; \
@@ -198,11 +186,14 @@ setup-llama-native:
 		-DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
 	$(SYCL_ENV) PATH="$(NATIVE_PATH)" $(CMAKE) --build "$(LLAMA_CPP_DIR)/build" --config Release \
 		-j --target llama-server
+	@echo "A instalar dependências do launcher (gguf, psutil)..."
+	uv pip install "gguf>=0.10.0" "psutil>=5.9.0"
 	@echo "✔  llama-server compilado: $(LLAMA_CPP_DIR)/build/bin/llama-server"
 
-# Servidor NATIVO OpenAI-compatível na GPU para o opencode. Tool-calling nativo
-# via --jinja (template do GGUF). Endpoint: http://$(SERVE_HOST):$(SERVE_PORT)/v1
-serve-llama-native:
+# Servidor OpenAI-compatível na GPU para o opencode (ou qualquer cliente OpenAI),
+# via llama-server --jinja (tool-calling nativo, template do GGUF).
+# Endpoint: http://$(SERVE_HOST):$(SERVE_PORT)/v1  (apiKey ignorada).
+serve-llama:
 	$(SYCL_ENV) LLAMA_CPP_DIR="$(LLAMA_CPP_DIR)" $(PY) benchmarks/serve_llama_native.py \
 		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
 		--host $(SERVE_HOST) --port $(SERVE_PORT) \

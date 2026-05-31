@@ -75,11 +75,14 @@ make bench-llama        # single model
 
 `make serve-llama` exposes the GGUF model on the Arc GPU via an
 OpenAI-compatible endpoint so the [opencode](https://opencode.ai) IDE (or any
-OpenAI client) can use it as a local provider.
+OpenAI client) can use it as a local provider. It runs the **upstream
+`llama-server`** binary (built with SYCL) with `--jinja`, so tool-calling is
+parsed by llama.cpp's built-in, grammar-constrained parser (maintained upstream).
 
 ```bash
+make setup-llama-server                             # one-off: clone + build llama-server (SYCL, needs oneAPI)
 make serve-llama                                    # interactive model picker
-make serve-llama SERVE_MODEL=Qwen/Qwen2.5-1.5B-Instruct # skip menu (fixed model)
+make serve-llama SERVE_MODEL=Qwen/Qwen2.5-3B-Instruct # skip menu (fixed model)
 make serve-llama SERVE_HOST=0.0.0.0 SERVE_PORT=9000  # change address/port
 make serve-llama SERVE_NCTX=16384                    # fixed context (override auto)
 ```
@@ -92,40 +95,20 @@ the model's trained context (read from the GGUF metadata), capped at
 *"Requested tokens exceeded context window"* with large prompts/tools, and stays
 within the Arc iGPU's SYCL single-allocation limit (the 7B/8B fail to create
 their context at 32768, so they cap at 16384; ≤3B models run the full 32768).
-Override with `SERVE_NCTX=<n>` (fixed) or `SERVE_MAX_CTX=<n>` (auto cap).
+Override with `SERVE_NCTX=<n>` (fixed) or `SERVE_MAX_CTX=<n>` (auto cap). The
+server runs with `--parallel 1` so a single opencode client gets the full
+context window (otherwise the context is split across auto slots).
 
-For **Qwen** models the server auto-enables a Qwen2.5-native tool-calling chat
-handler (`qwen2.5-tool-calling`) so opencode gets native `tool_calls` (including
-over streaming) instead of tool calls leaking into the text or the agent looping
-because tool results are dropped. Override with `--chat-format none` to fall
-back to the GGUF's own template. Set `SERVE_DUMP_REQUESTS=<path>` to log
-requests and model outputs for debugging.
+**Recommended model — `Qwen/Qwen2.5-3B-Instruct` (general).** llama.cpp's native
+parser (`peg-native`) only extracts `<tool_call>` tags and has **no** markdown-fence
+fallback. The general 3B emits `<tool_call>` natively and works end-to-end
+(verified: tool call → tool result → final answer). The **Qwen2.5-Coder** models
+wrap their tool calls in ```` ```json ```` fences (a code-model bias) which the
+native parser does not recover, so tool-calling breaks with them — the launcher
+prints a warning if you pick one. Use a general Qwen2.5 model for opencode.
 
 Endpoint: `http://127.0.0.1:8080/v1` (the API key is not validated). See
 [SETUP.md](SETUP.md#2-llamacpp--gpu-sycl) for the `opencode.json` provider config.
-
-#### Alternative: native `llama-server --jinja`
-
-`make serve-llama-native` serves the same models through the **upstream
-`llama-server`** binary (built with SYCL) using its built-in, grammar-constrained
-tool-calling (`--jinja`) instead of our Python handler. Tool-call parsing is then
-maintained by llama.cpp upstream.
-
-```bash
-make setup-llama-native                              # one-off: clone + build (SYCL, needs oneAPI)
-make serve-llama-native                              # interactive model picker
-make serve-llama-native SERVE_MODEL=Qwen/Qwen2.5-3B-Instruct
-```
-
-**Model caveat:** llama.cpp's native parser (`peg-native`) only extracts
-`<tool_call>` tags and has **no** markdown-fence fallback. The general
-**Qwen2.5-3B-Instruct** emits `<tool_call>` natively and works perfectly, so it
-is the recommended model for this path. The **Qwen2.5-Coder** models wrap their
-tool calls in ```` ```json ```` fences (a code-model bias) which the native parser
-does not recover — for a Coder model use `make serve-llama` (the Python handler
-has a markdown fallback). The launcher prints a warning if you pick a Coder model.
-The server runs with `--parallel 1` so a single opencode client gets the full
-context window (otherwise the context is split across auto slots).
 
 
 ### Override variables

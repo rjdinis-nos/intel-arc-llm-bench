@@ -1,22 +1,21 @@
-"""Servidor nativo llama.cpp (`llama-server`) na Intel Arc GPU (SYCL), com
-*tool-calling* nativo via `--jinja`.
+"""Servidor llama.cpp (`llama-server`) na Intel Arc GPU (SYCL), com *tool-calling*
+nativo via `--jinja`.
 
-Alternativa ao serve_llama.py (que usa os bindings llama-cpp-python e um handler de
-*tool-calling* escrito à mão). Aqui delegamos no servidor C++ oficial do llama.cpp:
-com `--jinja` ele usa o *chat template* embebido no próprio GGUF (o template oficial
-do Qwen2.5, formato Hermes `<tools>`/`<tool_call>`/`<tool_response>`) e tem um
-*parser* de *tool calls* nativo (com gramática), por isso o opencode recebe
-`tool_calls` correctos sem código nosso a manter.
+Delegamos no servidor C++ oficial do llama.cpp: com `--jinja` ele usa o *chat
+template* embebido no próprio GGUF (o template oficial do Qwen2.5, formato Hermes
+`<tools>`/`<tool_call>`/`<tool_response>`) e tem um *parser* de *tool calls* nativo
+(com gramática), por isso o opencode recebe `tool_calls` correctos sem código nosso
+a manter.
 
 Este *launcher* reaproveita o catálogo/escolha de modelo, a resolução do ficheiro
-GGUF e o cálculo de contexto (serve_common + benchmark_llama) e depois faz `exec`
-do binário `llama-server` com os argumentos certos. Compila o binário com:
+GGUF e o cálculo de contexto (serve_common) e depois faz `exec` do binário
+`llama-server` com os argumentos certos. Compila o binário com:
 
-    make setup-llama-native     # clona + compila llama.cpp (SYCL/Intel)
+    make setup-llama-server     # clona + compila llama.cpp (SYCL/Intel)
 
 e arranca com:
 
-    make serve-llama-native     # escolhe o modelo e serve
+    make serve-llama            # escolhe o modelo e serve
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from serve_common import (  # noqa: E402
     AUTO_CTX_CAP,
-    RECOMMENDED_MODEL_NATIVE,
+    RECOMMENDED_MODEL,
     _load_token,
     get_gguf_path,
     resolve_ctx,
@@ -56,7 +55,7 @@ def find_server_bin(explicit: str | None) -> str:
     raise SystemExit(
         "Binário 'llama-server' não encontrado.\n"
         f"  Procurado em: {DEFAULT_SERVER_BIN} e no PATH.\n"
-        "  Compila-o com:  make setup-llama-native\n"
+        "  Compila-o com:  make setup-llama-server\n"
         "  Ou aponta para ele com --server-bin / LLAMA_SERVER_BIN."
     )
 
@@ -126,16 +125,13 @@ def main() -> None:
     print("  apiKey  = qualquer-valor (não é validado)")
     print(f"  model   = {alias}")
     print()
-    if model_id == RECOMMENDED_MODEL_NATIVE:
-        print(f"(modelo recomendado para opencode no servidor nativo: "
-              f"{RECOMMENDED_MODEL_NATIVE})")
+    if model_id == RECOMMENDED_MODEL:
+        print(f"(modelo recomendado para opencode: {RECOMMENDED_MODEL})")
         print()
     elif "Coder" in model_id and not args.no_jinja:
         print("AVISO: modelos Qwen2.5-Coder embrulham as chamadas de ferramentas "
               "em ```json e o parser nativo do llama.cpp (peg-native) não as "
-              "extrai. Para tool-calling com um modelo Coder usa antes "
-              "'make serve-llama' (handler Python com fallback markdown). "
-              f"Para o servidor nativo usa {RECOMMENDED_MODEL_NATIVE}.")
+              f"extrai. Para tool-calling com o opencode usa {RECOMMENDED_MODEL}.")
         print()
 
     cmd = [

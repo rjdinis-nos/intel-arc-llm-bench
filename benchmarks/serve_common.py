@@ -1,8 +1,8 @@
-"""Catálogo, dimensionamento e resolução de contexto — partilhado pelos servidores.
+"""Catálogo, dimensionamento e resolução de contexto — partilhado.
 
 Usado por:
-  - serve_llama.py        (servidor llama-cpp-python, handler Python)
   - serve_llama_native.py (servidor nativo llama.cpp `llama-server --jinja`)
+  - benchmark_llama.py     (resolução/obtenção dos ficheiros GGUF)
 
 Deliberadamente SEM importar `llama_cpp`: o caminho nativo não depende dos bindings
 Python, por isso toda a lógica de catálogo/memória/contexto vive aqui.
@@ -23,15 +23,14 @@ FALLBACK_CTX = 8192
 # Margem fixa para buffers de compute/contexto do runtime, além de pesos + KV.
 RUNTIME_OVERHEAD_MIB = 512
 
-RECOMMENDED_MODEL = "Qwen/Qwen2.5-Coder-3B-Instruct"
-
-# Modelo recomendado para o servidor NATIVO (llama-server --jinja). O parser de
-# tool-calling nativo do llama.cpp (peg-native) só extrai tags <tool_call> e não
-# tem fallback para JSON em blocos markdown ```json. O Qwen2.5-Coder (modelo de
-# código) tende a embrulhar a chamada em ```json e falha; o Qwen2.5-3B "geral"
-# emite <tool_call> nativamente e funciona perfeitamente. Para o servidor Python
-# (serve_llama.py) o handler tem fallback markdown, por isso aí o Coder funciona.
-RECOMMENDED_MODEL_NATIVE = "Qwen/Qwen2.5-3B-Instruct"
+# Modelo recomendado para o servidor (llama-server --jinja) e para o opencode.
+# O parser de tool-calling nativo do llama.cpp (peg-native) só extrai tags
+# <tool_call> e NÃO tem fallback para JSON em blocos markdown ```json. O
+# Qwen2.5-3B "geral" emite <tool_call> nativamente e funciona perfeitamente; os
+# modelos Qwen2.5-Coder (modelos de código) tendem a embrulhar a chamada em
+# ```json e o parser nativo não as recupera — por isso o modelo geral é o
+# recomendado para tool-calling com o opencode.
+RECOMMENDED_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 
 # Catálogo de modelos que o servidor sabe disponibilizar (subconjunto dos que o
 # benchmark consegue obter em GGUF). Para cada um guardamos uma estimativa do
@@ -41,12 +40,13 @@ RECOMMENDED_MODEL_NATIVE = "Qwen/Qwen2.5-3B-Instruct"
 # 'note' é uma etiqueta curta mostrada no menu. Valores obtidos dos config.json /
 # tamanhos reais dos ficheiros GGUF Q4_K_M no HuggingFace.
 SERVE_CATALOG: dict[str, dict] = {
-    # Qwen2.5-Coder — código + tool-calling (ideais para opencode)
+    # Qwen2.5-Coder — código (tool-calling fenced em ```json: usa o modelo geral)
     "Qwen/Qwen2.5-Coder-7B-Instruct": dict(
         weights_mib=4466, n_layers=28, n_kv_heads=4, head_dim=128, ctx_cap=16384,
-        note="código (melhor, mas ctx≤16384 na iGPU)"),
+        note="código (melhor, mas ctx≤16384; tool-calls em ```json não extraídas)"),
     "Qwen/Qwen2.5-Coder-3B-Instruct": dict(
-        weights_mib=2007, n_layers=36, n_kv_heads=2, head_dim=128, note="código, ctx 32768 (opencode)"),
+        weights_mib=2007, n_layers=36, n_kv_heads=2, head_dim=128,
+        note="código, ctx 32768 (tool-calls em ```json não extraídas pelo parser nativo)"),
     "Qwen/Qwen2.5-Coder-1.5B-Instruct": dict(
         weights_mib=1066, n_layers=28, n_kv_heads=2, head_dim=128, note="código (leve)"),
     "Qwen/Qwen2.5-Coder-0.5B-Instruct": dict(
@@ -54,7 +54,7 @@ SERVE_CATALOG: dict[str, dict] = {
     # Qwen2.5 — geral
     "Qwen/Qwen2.5-3B-Instruct": dict(
         weights_mib=2007, n_layers=36, n_kv_heads=2, head_dim=128,
-        note="geral, ctx 32768 (recomendado p/ serve-llama-native)"),
+        note="geral, ctx 32768 (recomendado p/ opencode)"),
     "Qwen/Qwen2.5-1.5B-Instruct": dict(
         weights_mib=1408, n_layers=28, n_kv_heads=2, head_dim=128, note="geral"),
     "Qwen/Qwen2.5-0.5B-Instruct": dict(

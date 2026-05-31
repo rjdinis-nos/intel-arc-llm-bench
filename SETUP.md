@@ -118,8 +118,10 @@ make sweep-llama-quick  # smoke test
 
 ### Servir o modelo ao opencode (ou outro cliente OpenAI)
 
-`make serve-llama` arranca o servidor OpenAI-compatível do `llama-cpp-python`
-na GPU. Expõe `/v1/chat/completions`, `/v1/models`, etc.
+`make serve-llama` arranca o servidor OpenAI-compatível na GPU usando o binário
+**`llama-server`** (oficial do llama.cpp, compilado com SYCL) com `--jinja`. Expõe
+`/v1/chat/completions`, `/v1/models`, etc. Compila o binário uma vez com
+`make setup-llama-server` (clona + compila; ver mais abaixo).
 
 Sem argumentos, **pergunta interactivamente** qual o modelo a servir, mostrando
 apenas os que cabem na memória disponível (estimativa pesos + KV-cache na iGPU
@@ -136,8 +138,9 @@ Escolhe um modelo [1-3] (Enter = 1):
 ```
 
 ```bash
+make setup-llama-server                             # uma vez: clona + compila o llama-server (SYCL, requer oneAPI)
 make serve-llama                                    # menu interactivo
-make serve-llama SERVE_MODEL=Qwen/Qwen2.5-1.5B-Instruct # sem menu (modelo fixo)
+make serve-llama SERVE_MODEL=Qwen/Qwen2.5-3B-Instruct # sem menu (modelo fixo)
 make serve-llama SERVE_HOST=0.0.0.0 SERVE_PORT=9000  # outro endereço/porta
 make serve-llama SERVE_NCTX=16384                    # contexto fixo (override)
 ```
@@ -154,35 +157,31 @@ grafo crescem com o contexto; na iGPU Arc (Xe-LPG) o backend SYCL tem um limite
 de alocação única que o 7B/8B excedem com 32768 (*"Failed to create
 llama_context"*) — por isso esses modelos têm um tecto próprio de 16384, enquanto
 modelos mais pequenos (≤3B) correm com 32768 completos. Override: `SERVE_NCTX=<n>`
-(contexto fixo) ou `SERVE_MAX_CTX=<n>` (tecto do auto).
+(contexto fixo) ou `SERVE_MAX_CTX=<n>` (tecto do auto). O servidor corre com
+`--parallel 1` para que um único cliente opencode receba a janela de contexto
+completa (caso contrário o contexto é dividido pelos *slots* automáticos).
 
 Endpoint: `http://127.0.0.1:8080/v1` — a `apiKey` não é validada (usa qualquer
-valor). Requer os extras de servidor (já incluídos): `uvicorn`, `fastapi`,
-`pydantic-settings`, `sse-starlette`, `starlette-context`, `PyYAML`, `gguf`.
+valor).
 
-Para modelos **Qwen** (ChatML), o servidor activa automaticamente um handler de
-*tool-calling* nativo do Qwen2.5 (`--chat-format auto` → `qwen2.5-tool-calling`).
-Sem ele, o `llama-cpp-python` devolvia as *tool calls* como texto no `content` (o
-opencode não as reconhecia) e rebentava com *"ASGI callable returned without
-completing response"* no padrão do opencode (stream + `tool_choice:auto`). Os
-handlers genéricos (ex. `chatml-function-calling`) ou descartam silenciosamente as
-mensagens `role:tool` (o modelo nunca vê os resultados → ciclo infinito) ou usam um
-formato em que o Qwen não foi treinado (texto a vazar). O handler nativo:
-(1) renderiza o formato ChatML do Qwen2.5 (`<tools>` / `<tool_call>` /
-`<tool_response>`) e parseia as *tool calls* para o array `tool_calls`, com
-*fallback* para JSON em *markdown*; (2) suporta *streaming* de *tool calls* (gera
-sem stream e reemite como chunks); (3) corrige pedidos com `content:null` em
-mensagens `assistant` (que o opencode envia após uma *tool call*). Override:
-`make serve-llama` aceita `--chat-format none` (usa o template do GGUF) ou um nome
-explícito de handler. Para depurar, define `SERVE_DUMP_REQUESTS=/caminho/log` para
-gravar pedidos e *outputs* do modelo.
+O *tool-calling* é tratado pelo `llama-server --jinja`: usa o *chat template*
+embebido no GGUF (formato Qwen2.5 `<tools>`/`<tool_call>`/`<tool_response>`) e o
+*parser* nativo da llama.cpp, devolvendo `tool_calls` ao opencode sem código nosso
+a manter. **Ressalva quanto ao modelo:** o *parser* nativo (`peg-native`) só extrai
+tags `<tool_call>` e **não** tem *fallback* para JSON em blocos ```` ```json ````.
+O **Qwen2.5-3B-Instruct** (geral) emite `<tool_call>` nativamente e funciona de
+ponta a ponta (chamada → resultado → resposta final); os modelos **Qwen2.5-Coder**
+embrulham as *tool calls* em ```` ```json ```` (viés de modelo de código) e o
+*parser* nativo não as recupera, por isso o *tool-calling* falha com eles — usa um
+modelo Qwen2.5 geral para o opencode. O launcher avisa se escolheres um modelo Coder.
+Para depurar, aumenta a verbosidade do `llama-server` (`-lv N`).
 
 Configura o **opencode** com um *custom provider* OpenAI-compatível. Cria/edita
 `opencode.json` no projecto (ou `~/.config/opencode/opencode.json`). O `id` do
 modelo tem de coincidir com o que está a ser servido (recomendado para opencode:
-**Qwen2.5-Coder-3B-Instruct** — capaz em código e *tool-calling*, e corre com a
-janela de contexto completa de 32768 na iGPU; o 7B é melhor mas fica limitado a
-ctx 16384):
+**Qwen2.5-3B-Instruct** (geral) — emite `<tool_call>` nativamente, por isso o
+*tool-calling* funciona com o `llama-server`, e corre com a janela de contexto
+completa de 32768 na iGPU):
 
 ```json
 {
@@ -196,8 +195,8 @@ ctx 16384):
         "apiKey": "local"
       },
       "models": {
-        "Qwen/Qwen2.5-Coder-3B-Instruct": {
-          "name": "Qwen2.5-Coder-3B (Arc GPU)",
+        "Qwen/Qwen2.5-3B-Instruct": {
+          "name": "Qwen2.5-3B (Arc GPU)",
           "limit": { "context": 32768, "output": 4096 }
         }
       }
@@ -215,11 +214,11 @@ seleccionar.
 
 | Modelo | Tipo | Pesos (Q4_K_M) |
 |---|---|---:|
-| `Qwen/Qwen2.5-Coder-7B-Instruct` | código (melhor, mas ctx≤16384 na iGPU) | 4466 MB |
-| `Qwen/Qwen2.5-Coder-3B-Instruct` ★ | código, ctx 32768 (recomendado opencode) | 2007 MB |
+| `Qwen/Qwen2.5-Coder-7B-Instruct` | código (ctx≤16384; tool-calls em ```json não extraídas) | 4466 MB |
+| `Qwen/Qwen2.5-Coder-3B-Instruct` | código (tool-calls em ```json não extraídas) | 2007 MB |
 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | código (leve) | 1066 MB |
 | `Qwen/Qwen2.5-Coder-0.5B-Instruct` | código (mínimo) | 469 MB |
-| `Qwen/Qwen2.5-3B-Instruct` | geral, ctx 32768 (recomendado p/ serve-llama-native) | 2007 MB |
+| `Qwen/Qwen2.5-3B-Instruct` ★ | geral, ctx 32768 (recomendado opencode) | 2007 MB |
 | `Qwen/Qwen2.5-1.5B-Instruct` | geral | 1408 MB |
 | `Qwen/Qwen2.5-0.5B-Instruct` | geral (mínimo) | 469 MB |
 | `meta-llama/Llama-3.1-8B-Instruct` | geral (grande) | 4693 MB |
@@ -228,38 +227,19 @@ seleccionar.
 
 Modelos maiores são mais capazes mas mais lentos na iGPU. Para adicionar outros,
 acrescenta uma entrada em `SERVE_CATALOG` (benchmarks/serve_common.py) e em
-`GGUF_REPOS` (benchmarks/serve_common.py).
+`GGUF_REPOS` (benchmarks/serve_common.py). Os modelos **Qwen2.5-Coder** correm
+bem mas embrulham as *tool calls* em ```` ```json ````, que o *parser* nativo da
+llama.cpp não extrai — para o opencode usa um modelo Qwen2.5 geral.
 
-#### Alternativa: servidor nativo `llama-server --jinja`
+#### Compilar o `llama-server` (`make setup-llama-server`)
 
-`make serve-llama-native` serve os mesmos modelos através do binário **`llama-server`
-da upstream** (compilado com SYCL) usando o *tool-calling* embutido e restringido por
-gramática (`--jinja`), em vez do nosso handler Python. A análise das *tool calls* passa
-a ser mantida pela própria llama.cpp.
-
-```bash
-make setup-llama-native                              # uma vez: clona + compila (SYCL, requer oneAPI)
-make serve-llama-native                              # menu interactivo
-make serve-llama-native SERVE_MODEL=Qwen/Qwen2.5-3B-Instruct
-```
-
-**Ressalva quanto ao modelo:** o parser nativo da llama.cpp (`peg-native`) só extrai
-tags `<tool_call>` e **não** tem *fallback* para JSON em blocos *markdown*. O
-**Qwen2.5-3B-Instruct** (geral) emite `<tool_call>` nativamente e funciona na
-perfeição, sendo por isso o modelo recomendado para este servidor. Os modelos
-**Qwen2.5-Coder** embrulham as *tool calls* em blocos ```` ```json ```` (viés de
-modelo de código) que o parser nativo não recupera — para um modelo Coder usa antes
-`make serve-llama` (o handler Python tem *fallback* markdown). O launcher avisa se
-escolheres um modelo Coder. O servidor corre com `--parallel 1` para que um único
-cliente opencode receba a janela de contexto completa (caso contrário o contexto é
-dividido pelos *slots* automáticos).
-
-A construção (`setup-llama-native`) clona `ggml-org/llama.cpp` para
-`$(LLAMA_CPP_DIR)` (default `~/.cache/llama/llama.cpp`) e compila só o alvo
-`llama-server` com `-DGGML_SYCL=ON -DGGML_SYCL_TARGET=INTEL` (compiladores
-`icx`/`icpx` do oneAPI; `cmake`/`ninja` são instalados no `.venv`). O binário fica em
-`$(LLAMA_CPP_DIR)/build/bin/llama-server`. Configura o opencode tal como acima — o
-endpoint e o `id` do modelo funcionam da mesma forma.
+`make setup-llama-server` clona `ggml-org/llama.cpp` para `$(LLAMA_CPP_DIR)`
+(default `~/.cache/llama/llama.cpp`) e compila só o alvo `llama-server` com
+`-DGGML_SYCL=ON -DGGML_SYCL_TARGET=INTEL` (compiladores `icx`/`icpx` do oneAPI;
+`cmake`/`ninja` são instalados no `.venv`). Instala também `gguf` e `psutil` (o
+*launcher* usa-os para ler o contexto de treino do GGUF e estimar a memória). O
+binário fica em `$(LLAMA_CPP_DIR)/build/bin/llama-server`. Override do checkout
+com `LLAMA_CPP_DIR=`.
 
 ### Resultados llama.cpp CPU (Q4_K_M, Core Ultra 7 255H) — baseline histórico
 

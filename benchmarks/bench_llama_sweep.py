@@ -24,8 +24,8 @@ REPO_ROOT  = SCRIPT_DIR.parent
 LLAMA_SCRIPT = SCRIPT_DIR / "benchmark_llama.py"
 RESULTS_DIR  = REPO_ROOT / "results"
 
-# Modelo recomendado para o opencode (igual a serve_llama.RECOMMENDED_MODEL);
-# incluído no sweep para se medir o desempenho do modelo que de facto se serve.
+# Modelo destacado no sweep (referência de desempenho de um modelo de código maior);
+# incluído para se medir o desempenho mesmo não sendo o recomendado para serving.
 RECOMMENDED_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
 DEFAULT_MODELS = [
