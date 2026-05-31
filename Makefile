@@ -51,7 +51,7 @@ NATIVE_PATH := $(abspath .venv/bin):$(PATH)
 .PHONY: help bench bench-quick sweep sweep-quick tokenizer check \
         test test-gpu test-hf test-chat all clean \
         setup-llama bench-llama bench-llama-quick sweep-llama sweep-llama-quick \
-        setup-llama-server serve-llama
+        setup-llama-server serve-llama opencode-config
 
 help:
 	@echo "Targets disponíveis:"
@@ -80,6 +80,7 @@ help:
 	@echo "── Servir um modelo ao opencode (llama-server --jinja: tool-calling nativo) ──"
 	@echo "  make setup-llama-server — clona + compila o llama-server (SYCL, requer oneAPI)"
 	@echo "  make serve-llama        — servidor OpenAI-compatível p/ opencode (escolhe modelo)"
+	@echo "  make opencode-config    — imprime a config do provider do opencode (JSON)"
 	@echo ""
 	@echo "Variáveis: MODEL DTYPE NEW_TOKENS RUNS WARMUP DEVICE PROMPT_TOKENS LLAMA_QUANT"
 	@echo "  PROMPT_TOKENS=64,256,1024  — adiciona sweep sobre tamanho do prompt/KV-cache"
@@ -198,5 +199,12 @@ serve-llama:
 		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
 		--host $(SERVE_HOST) --port $(SERVE_PORT) \
 		--n-ctx $(SERVE_NCTX) --max-ctx $(SERVE_MAX_CTX)
+
+# Imprime a configuração do provider do opencode (JSON, gerada a partir do
+# catálogo). Copia para ~/.config/opencode/opencode.json ou redirecciona:
+#   make opencode-config > ~/.config/opencode/opencode.json
+opencode-config:
+	@$(PY) benchmarks/serve_llama_native.py --print-opencode-config \
+		--host $(SERVE_HOST) --port $(SERVE_PORT)
 
 

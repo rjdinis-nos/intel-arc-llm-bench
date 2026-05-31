@@ -32,6 +32,7 @@ from serve_common import (  # noqa: E402
     RECOMMENDED_MODEL,
     _load_token,
     get_gguf_path,
+    opencode_config,
     resolve_ctx,
     select_model_interactively,
 )
@@ -93,7 +94,16 @@ def main() -> None:
     parser.add_argument("--chat-template-file", default=None,
                         help="Ficheiro Jinja de chat-template a usar em vez do "
                              "embutido no GGUF (override do --jinja).")
+    parser.add_argument("--print-opencode-config", action="store_true",
+                        help="Imprime a configuração do provider do opencode "
+                             "(JSON, a partir do catálogo) e sai.")
     args = parser.parse_args()
+
+    if args.print_opencode_config:
+        import json
+        cfg = opencode_config(base_url=f"http://{args.host}:{args.port}/v1")
+        print(json.dumps(cfg, indent=2, ensure_ascii=False))
+        return
 
     server_bin = find_server_bin(args.server_bin)
     n_threads = args.n_threads or multiprocessing.cpu_count()

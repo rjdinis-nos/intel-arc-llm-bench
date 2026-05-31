@@ -70,7 +70,51 @@ SERVE_CATALOG: dict[str, dict] = {
 }
 
 
-def get_n_ctx_train(gguf_path) -> int | None:
+def _display_name(model_id: str, spec: dict) -> str:
+    """Nome amigável do modelo para o opencode (com marcadores úteis)."""
+    short = model_id.split("/", 1)[-1].replace("-Instruct", "")
+    cap = spec.get("ctx_cap")
+    parts = [f"{short} (Arc GPU"]
+    if cap:
+        parts.append(f", ctx {cap}")
+    if "Coder" in model_id:
+        parts.append(", sem tool-calling")
+    parts.append(")")
+    name = "".join(parts)
+    if model_id == RECOMMENDED_MODEL:
+        name += " \u2605"
+    return name
+
+
+def opencode_config(base_url: str = "http://127.0.0.1:8080/v1",
+                    api_key: str = "local") -> dict:
+    """Constrói o dict de configuração do provider OpenAI-compatível do opencode
+    a partir do SERVE_CATALOG, para `~/.config/opencode/opencode.json(c)`.
+
+    O limite de contexto de cada modelo segue `ctx_cap` (se existir) ou
+    `AUTO_CTX_CAP`, em linha com o que o servidor de facto disponibiliza.
+    """
+    models = {}
+    for model_id, spec in SERVE_CATALOG.items():
+        ctx = spec.get("ctx_cap", AUTO_CTX_CAP)
+        models[model_id] = {
+            "name": _display_name(model_id, spec),
+            "limit": {"context": ctx, "output": 4096},
+        }
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "llama-arc": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "llama.cpp (Intel Arc GPU)",
+                "options": {"baseURL": base_url, "apiKey": api_key},
+                "models": models,
+            }
+        },
+    }
+
+
+
     """Lê o contexto de treino (`*.context_length`) dos metadados do GGUF.
 
     Devolve None se não for possível (gguf não instalado ou chave ausente).

@@ -210,6 +210,15 @@ O `id` do modelo tem de coincidir com o modelo escolhido no `serve-llama`
 corre `/connect` → **Other** (id `llama-arc`) e `/models` no opencode para o
 seleccionar.
 
+Para gerar esta configuração automaticamente (com todos os modelos do catálogo,
+o ★ no recomendado e os limites de contexto certos), corre `make opencode-config`
+e grava o resultado:
+
+```bash
+make opencode-config > ~/.config/opencode/opencode.json
+# (respeita SERVE_HOST/SERVE_PORT no baseURL)
+```
+
 #### Modelos no menu do `serve-llama`
 
 | Modelo | Tipo | Pesos (Q4_K_M) |
