@@ -10,8 +10,9 @@ Contents:
 - [3. Variables and flags](#3-variables-and-flags)
 - [4. Reading the logs](#4-reading-the-logs)
 - [5. Performance metrics (prefill vs decode)](#5-performance-metrics-prefill-vs-decode)
-- [6. Common warnings (and whether they matter)](#6-common-warnings-and-whether-they-matter)
-- [7. Troubleshooting](#7-troubleshooting)
+- [6. Hardware comparison (this iGPU vs Apple Silicon)](#6-hardware-comparison-this-igpu-vs-apple-silicon)
+- [7. Common warnings (and whether they matter)](#7-common-warnings-and-whether-they-matter)
+- [8. Troubleshooting](#8-troubleshooting)
 
 ---
 
@@ -210,7 +211,37 @@ Each request is a **task** on slot 0.
 
 ---
 
-## 6. Common warnings (and whether they matter)
+## 6. Hardware comparison (this iGPU vs Apple Silicon)
+
+Decode ("typing speed") is **memory-bandwidth-bound**, so it scales roughly with a
+machine's memory bandwidth. The table compares this repo's Intel Arc iGPU with the
+Mac Mini line for serving Qwen2.5 **Instruct** models to opencode (the `peg-native`
+tool-calling caveat is model-specific, not hardware — always prefer a *general*
+Qwen2.5, not Coder).
+
+| Machine | Memory bandwidth | 7B Q4 decode | Best model for opencode |
+|---|---|---|---|
+| **Arc 140T** (this repo's iGPU, Xe-LPG) | ~120 GB/s | n/a (runs 3B at ~15 t/s) | Qwen2.5-3B-Instruct |
+| **Mac Mini M4** (base) | 120 GB/s | ~20–25 t/s | Qwen2.5-7B-Instruct |
+| **Mac Mini M5** (base, projected) | ~153 GB/s | ~26–32 t/s | Qwen2.5-7B-Instruct |
+| **Mac Mini M4 Pro** | 273 GB/s | ~45–55 t/s | Qwen2.5-14B-Instruct |
+| **Mac Mini M5 Pro** (projected) | ~300+ GB/s | ~55–65 t/s | Qwen2.5-14B-Instruct |
+
+Notes:
+- Figures are **single-stream decode** estimates (Q4_K_M, 32k context,
+  `--parallel 1`, a few-thousand-token prompt) ≈ theoretical bandwidth max ×
+  ~60–80% efficiency; they **drop as context fills**.
+- A base **M4/M5 Mini** is the step up from this iGPU that makes **7B** comfortable;
+  the **Pro** tiers are what make **14B** viable for agentic/tool-calling work that
+  the Arc iGPU can't fit/run well at 32k context.
+- **M5's** main edge is **prefill** (its per-GPU-core Neural Accelerators boost the
+  compute-bound prompt processing more than the bandwidth-bound decode).
+- **Mac Mini M5 / M5 Pro are not yet released** (expected H2 2026); those rows are
+  projections from the known M5 silicon, not measured.
+
+---
+
+## 7. Common warnings (and whether they matter)
 
 | Log line | Matters? | Explanation |
 |---|---|---|
@@ -222,7 +253,7 @@ Each request is a **task** on slot 0.
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
