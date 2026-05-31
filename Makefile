@@ -40,10 +40,18 @@ SERVE_MODEL ?=           # vazio = perguntar interactivamente (só modelos que c
 SERVE_NCTX  ?= 0          # 0 = automático (contexto de treino do modelo, limitado por SERVE_MAX_CTX)
 SERVE_MAX_CTX ?= 32768    # tecto global do modo automático (modelos grandes têm limite próprio mais baixo na iGPU)
 
+# Checkout/build do llama.cpp NATIVO (binário llama-server). Fora do repo (cache XDG)
+# porque o build é pesado. Override com LLAMA_CPP_DIR=.
+LLAMA_CPP_DIR ?= $(HOME)/.cache/llama/llama.cpp
+LLAMA_CPP_REPO ?= https://github.com/ggml-org/llama.cpp
+# cmake/ninja: usa os do .venv se existirem (instalados via pip), senão os do sistema.
+CMAKE := $(if $(wildcard .venv/bin/cmake),$(abspath .venv/bin/cmake),cmake)
+NATIVE_PATH := $(abspath .venv/bin):$(PATH)
+
 .PHONY: help bench bench-quick sweep sweep-quick tokenizer check \
         test test-gpu test-hf test-chat all clean \
         setup-llama bench-llama bench-llama-quick sweep-llama sweep-llama-quick \
-        serve-llama
+        serve-llama setup-llama-native serve-llama-native
 
 help:
 	@echo "Targets disponíveis:"
@@ -70,11 +78,16 @@ help:
 	@echo "  make sweep-llama-quick  — sweep llama.cpp smoke test"
 	@echo "  make serve-llama        — servidor OpenAI-compatível p/ opencode (escolhe modelo)"
 	@echo ""
+	@echo "── llama.cpp NATIVO (llama-server --jinja: tool-calling nativo p/ opencode) ──"
+	@echo "  make setup-llama-native — clona + compila o llama-server (SYCL, requer oneAPI)"
+	@echo "  make serve-llama-native — servidor nativo p/ opencode (tool-calling via --jinja)"
+	@echo ""
 	@echo "Variáveis: MODEL DTYPE NEW_TOKENS RUNS WARMUP DEVICE PROMPT_TOKENS LLAMA_QUANT"
 	@echo "  PROMPT_TOKENS=64,256,1024  — adiciona sweep sobre tamanho do prompt/KV-cache"
 	@echo "  SERVE_HOST=127.0.0.1 SERVE_PORT=8080  — endereço do serve-llama"
 	@echo "  SERVE_MODEL=...  — modelo a servir (vazio = menu interactivo dos que cabem)"
 	@echo "  SERVE_NCTX=0  — contexto do serve-llama (0=auto pelo modelo, limite SERVE_MAX_CTX)"
+	@echo "  LLAMA_CPP_DIR=$(LLAMA_CPP_DIR)  — dir do checkout/build nativo do llama.cpp"
 
 bench:
 	$(PY) benchmarks/benchmark_tps.py \
@@ -160,4 +173,39 @@ serve-llama:
 		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
 		--host $(SERVE_HOST) --port $(SERVE_PORT) \
 		--n-ctx $(SERVE_NCTX) --max-ctx $(SERVE_MAX_CTX)
+
+# llama.cpp NATIVO: compila o binário llama-server com o backend SYCL (Intel Arc).
+# Alternativa ao llama-cpp-python; traz tool-calling nativo (--jinja) mais robusto.
+setup-llama-native:
+	@if [ ! -f "$(ONEAPI_ENV)" ]; then \
+		echo "✗ Intel oneAPI não encontrado em $(ONEAPI_ENV)."; \
+		echo "  Instala o Intel oneAPI Base Toolkit (DPC++ + MKL) ou define"; \
+		echo "  ONEAPI_ENV=/caminho/para/setvars.sh."; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(LLAMA_CPP_DIR)/.git" ]; then \
+		echo "A clonar llama.cpp para $(LLAMA_CPP_DIR)..."; \
+		git clone --depth 1 $(LLAMA_CPP_REPO) "$(LLAMA_CPP_DIR)"; \
+	else \
+		echo "A actualizar $(LLAMA_CPP_DIR)..."; \
+		git -C "$(LLAMA_CPP_DIR)" pull --ff-only || true; \
+	fi
+	@echo "A compilar llama-server (SYCL/Intel Arc GPU)..."
+	$(SYCL_ENV) PATH="$(NATIVE_PATH)" $(CMAKE) -B "$(LLAMA_CPP_DIR)/build" -S "$(LLAMA_CPP_DIR)" \
+		-G Ninja \
+		-DGGML_SYCL=ON -DGGML_SYCL_TARGET=INTEL \
+		-DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx \
+		-DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+	$(SYCL_ENV) PATH="$(NATIVE_PATH)" $(CMAKE) --build "$(LLAMA_CPP_DIR)/build" --config Release \
+		-j --target llama-server
+	@echo "✔  llama-server compilado: $(LLAMA_CPP_DIR)/build/bin/llama-server"
+
+# Servidor NATIVO OpenAI-compatível na GPU para o opencode. Tool-calling nativo
+# via --jinja (template do GGUF). Endpoint: http://$(SERVE_HOST):$(SERVE_PORT)/v1
+serve-llama-native:
+	$(SYCL_ENV) LLAMA_CPP_DIR="$(LLAMA_CPP_DIR)" $(PY) benchmarks/serve_llama_native.py \
+		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
+		--host $(SERVE_HOST) --port $(SERVE_PORT) \
+		--n-ctx $(SERVE_NCTX) --max-ctx $(SERVE_MAX_CTX)
+
 

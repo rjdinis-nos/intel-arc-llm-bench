@@ -38,91 +38,22 @@ except ImportError:
         "pip install llama-cpp-python --force-reinstall"
     )
 
-from huggingface_hub import hf_hub_download, list_repo_files
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from serve_common import (  # noqa: E402
+    CACHE_DIR,
+    GGUF_REPOS,
+    _load_token,
+    get_gguf_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# GGUF cache. Segue o padrão XDG ($XDG_CACHE_HOME, default ~/.cache) em vez de
-# viver dentro do repositório: os ficheiros GGUF são grandes (vários GB) e a
-# partição do repositório pode ser pequena. Override com LLAMA_CACHE_DIR.
-_XDG_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-CACHE_DIR  = Path(os.environ.get("LLAMA_CACHE_DIR", _XDG_CACHE / "llama"))
-
-# Mapeamento: modelo HF → (repo GGUF no HuggingFace, padrão no nome do ficheiro)
-GGUF_REPOS: dict[str, tuple[str, str]] = {
-    # Qwen2.5-Coder (código / tool-calling — recomendados para agentes como opencode)
-    "Qwen/Qwen2.5-Coder-0.5B-Instruct": ("Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF", "q4_k_m"),
-    "Qwen/Qwen2.5-Coder-1.5B-Instruct": ("Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF", "q4_k_m"),
-    "Qwen/Qwen2.5-Coder-3B-Instruct":   ("Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",   "q4_k_m"),
-    # 7B: o repo oficial é multi-ficheiro (sharded); usa-se o single-file do bartowski.
-    "Qwen/Qwen2.5-Coder-7B-Instruct":   ("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF", "Q4_K_M"),
-    # Qwen2.5 (geral)
-    "Qwen/Qwen2.5-0.5B-Instruct":       ("Qwen/Qwen2.5-0.5B-Instruct-GGUF",  "q4_k_m"),
-    "Qwen/Qwen2.5-1.5B-Instruct":       ("Qwen/Qwen2.5-1.5B-Instruct-GGUF",  "q4_k_m"),
-    "Qwen/Qwen2.5-3B-Instruct":         ("Qwen/Qwen2.5-3B-Instruct-GGUF",    "q4_k_m"),
-    # Llama 3.x (geral) — GGUF do bartowski (não gated)
-    "meta-llama/Llama-3.2-1B-Instruct": ("bartowski/Llama-3.2-1B-Instruct-GGUF", "Q4_K_M"),
-    "meta-llama/Llama-3.2-3B-Instruct": ("bartowski/Llama-3.2-3B-Instruct-GGUF", "Q4_K_M"),
-    "meta-llama/Llama-3.1-8B-Instruct": ("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", "Q4_K_M"),
-}
 
 DEFAULT_PROMPT = (
     "Explain clearly and in detail what is large language model inference, "
     "including the prefill and decode phases, and why throughput (tokens per second) "
     "is an important metric."
 )
-
-
-def _load_token() -> str | None:
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        token = token or os.environ.get("HF_TOKEN")
-    except ImportError:
-        pass
-    return token
-
-
-def get_gguf_path(model_id: str, quant_pattern: str, token: str | None = None) -> Path:
-    """Devolve o caminho local do ficheiro GGUF, descarregando-o se necessário."""
-    if model_id not in GGUF_REPOS:
-        raise ValueError(
-            f"Modelo '{model_id}' não suportado. Adiciona uma entrada em GGUF_REPOS."
-        )
-    repo_id, default_pattern = GGUF_REPOS[model_id]
-    pattern = quant_pattern or default_pattern
-
-    # Caminho rápido: verificar cache local antes de ir à rede.
-    # hf_hub_download faz sempre um HEAD request para validar o etag,
-    # o que pode bloquear vários minutos se a ligação for instável.
-    cache_slug = repo_id.replace("/", "--")
-    if CACHE_DIR.exists():
-        cached = [
-            f for f in CACHE_DIR.rglob("*.gguf")
-            if pattern.lower() in f.name.lower() and cache_slug in str(f)
-        ]
-        if cached:
-            cached.sort(key=lambda f: ("large" in f.name.lower(), f.name))
-            return cached[0]
-
-    # Ficheiro não está em cache — descarregar do HF Hub.
-    files = [f for f in list_repo_files(repo_id, token=token) if f.endswith(".gguf")]
-    matches = [f for f in files if pattern.lower() in f.lower()]
-    if not matches:
-        raise FileNotFoundError(
-            f"Nenhum ficheiro GGUF com '{pattern}' em {repo_id}.\n"
-            f"Disponíveis: {files}"
-        )
-    # Se houver vários, prefere o mais pequeno (sem 'large' no nome)
-    matches.sort(key=lambda f: ("large" in f.lower(), f))
-    chosen = matches[0]
-
-    local = hf_hub_download(
-        repo_id=repo_id, filename=chosen,
-        cache_dir=str(CACHE_DIR), token=token,
-    )
-    return Path(local)
 
 
 def run_once(

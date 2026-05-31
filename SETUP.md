@@ -219,7 +219,7 @@ seleccionar.
 | `Qwen/Qwen2.5-Coder-3B-Instruct` ★ | código, ctx 32768 (recomendado opencode) | 2007 MB |
 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | código (leve) | 1066 MB |
 | `Qwen/Qwen2.5-Coder-0.5B-Instruct` | código (mínimo) | 469 MB |
-| `Qwen/Qwen2.5-3B-Instruct` | geral | 2007 MB |
+| `Qwen/Qwen2.5-3B-Instruct` | geral, ctx 32768 (recomendado p/ serve-llama-native) | 2007 MB |
 | `Qwen/Qwen2.5-1.5B-Instruct` | geral | 1408 MB |
 | `Qwen/Qwen2.5-0.5B-Instruct` | geral (mínimo) | 469 MB |
 | `meta-llama/Llama-3.1-8B-Instruct` | geral (grande) | 4693 MB |
@@ -227,8 +227,39 @@ seleccionar.
 | `meta-llama/Llama-3.2-1B-Instruct` | geral (leve) | 1277 MB |
 
 Modelos maiores são mais capazes mas mais lentos na iGPU. Para adicionar outros,
-acrescenta uma entrada em `SERVE_CATALOG` (benchmarks/serve_llama.py) e em
-`GGUF_REPOS` (benchmarks/benchmark_llama.py).
+acrescenta uma entrada em `SERVE_CATALOG` (benchmarks/serve_common.py) e em
+`GGUF_REPOS` (benchmarks/serve_common.py).
+
+#### Alternativa: servidor nativo `llama-server --jinja`
+
+`make serve-llama-native` serve os mesmos modelos através do binário **`llama-server`
+da upstream** (compilado com SYCL) usando o *tool-calling* embutido e restringido por
+gramática (`--jinja`), em vez do nosso handler Python. A análise das *tool calls* passa
+a ser mantida pela própria llama.cpp.
+
+```bash
+make setup-llama-native                              # uma vez: clona + compila (SYCL, requer oneAPI)
+make serve-llama-native                              # menu interactivo
+make serve-llama-native SERVE_MODEL=Qwen/Qwen2.5-3B-Instruct
+```
+
+**Ressalva quanto ao modelo:** o parser nativo da llama.cpp (`peg-native`) só extrai
+tags `<tool_call>` e **não** tem *fallback* para JSON em blocos *markdown*. O
+**Qwen2.5-3B-Instruct** (geral) emite `<tool_call>` nativamente e funciona na
+perfeição, sendo por isso o modelo recomendado para este servidor. Os modelos
+**Qwen2.5-Coder** embrulham as *tool calls* em blocos ```` ```json ```` (viés de
+modelo de código) que o parser nativo não recupera — para um modelo Coder usa antes
+`make serve-llama` (o handler Python tem *fallback* markdown). O launcher avisa se
+escolheres um modelo Coder. O servidor corre com `--parallel 1` para que um único
+cliente opencode receba a janela de contexto completa (caso contrário o contexto é
+dividido pelos *slots* automáticos).
+
+A construção (`setup-llama-native`) clona `ggml-org/llama.cpp` para
+`$(LLAMA_CPP_DIR)` (default `~/.cache/llama/llama.cpp`) e compila só o alvo
+`llama-server` com `-DGGML_SYCL=ON -DGGML_SYCL_TARGET=INTEL` (compiladores
+`icx`/`icpx` do oneAPI; `cmake`/`ninja` são instalados no `.venv`). O binário fica em
+`$(LLAMA_CPP_DIR)/build/bin/llama-server`. Configura o opencode tal como acima — o
+endpoint e o `id` do modelo funcionam da mesma forma.
 
 ### Resultados llama.cpp CPU (Q4_K_M, Core Ultra 7 255H) — baseline histórico
 

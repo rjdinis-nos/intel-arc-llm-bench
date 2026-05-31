@@ -48,16 +48,17 @@ except ImportError as exc:  # pragma: no cover - depends on optional extras
         "'sse-starlette' 'starlette-context' 'PyYAML'"
     )
 
-from benchmark_llama import _load_token, get_gguf_path
+from serve_common import (
+    AUTO_CTX_CAP,
+    _load_token,
+    get_gguf_path,
+    resolve_ctx,
+    select_model_interactively,
+)
 
-# Limite de contexto em modo automático. O n_ctx influencia o tamanho da KV-cache
-# (que na iGPU Arc/UMA sai da RAM do sistema), por isso há um tecto global. Alguns
-# modelos têm ainda um limite mais baixo por causa do buffer de cómputo do grafo:
-# no 7B/8B, com 32768 esse buffer (~3.6 GiB) excede o limite de alocação única do
-# backend SYCL e a criação do contexto falha. Esses modelos trazem 'ctx_cap' no
-# catálogo. Override global com --n-ctx ou --max-ctx.
-AUTO_CTX_CAP = 32768
-FALLBACK_CTX = 8192
+
+# Limite de contexto em modo automático e catálogo de modelos vivem em
+# serve_common.py (partilhados com o servidor nativo). Importados acima.
 
 
 def resolve_chat_format(model_id: str) -> str | None:
@@ -434,163 +435,6 @@ class NullContentFixMiddleware:
         await self.app(scope, patched_receive, send)
 
 
-def get_n_ctx_train(gguf_path) -> int | None:
-    """Lê o contexto de treino (`*.context_length`) dos metadados do GGUF.
-
-    Devolve None se não for possível (gguf não instalado ou chave ausente).
-    """
-    try:
-        from gguf import GGUFReader
-    except ImportError:
-        return None
-    try:
-        reader = GGUFReader(str(gguf_path))
-        for key, field in reader.fields.items():
-            if key.endswith("context_length"):
-                return int(field.contents())
-    except Exception:
-        return None
-    return None
-
-
-# Catálogo de modelos que o servidor sabe disponibilizar (subconjunto dos que o
-# benchmark consegue obter em GGUF). Para cada um guardamos uma estimativa do
-# tamanho dos pesos (GGUF Q4_K_M, MB) e os parâmetros de arquitectura usados para
-# estimar a KV-cache: n.º de layers, n.º de KV-heads e dimensão de cada head.
-# Serve para decidir, sem descarregar, quais modelos cabem na memória disponível.
-# 'note' é uma etiqueta curta mostrada no menu. Valores obtidos dos config.json /
-# tamanhos reais dos ficheiros GGUF Q4_K_M no HuggingFace.
-RECOMMENDED_MODEL = "Qwen/Qwen2.5-Coder-3B-Instruct"
-
-SERVE_CATALOG: dict[str, dict] = {
-    # Qwen2.5-Coder — código + tool-calling (ideais para opencode)
-    "Qwen/Qwen2.5-Coder-7B-Instruct": dict(
-        weights_mib=4466, n_layers=28, n_kv_heads=4, head_dim=128, ctx_cap=16384,
-        note="código (melhor, mas ctx≤16384 na iGPU)"),
-    "Qwen/Qwen2.5-Coder-3B-Instruct": dict(
-        weights_mib=2007, n_layers=36, n_kv_heads=2, head_dim=128, note="código, ctx 32768 (opencode)"),
-    "Qwen/Qwen2.5-Coder-1.5B-Instruct": dict(
-        weights_mib=1066, n_layers=28, n_kv_heads=2, head_dim=128, note="código (leve)"),
-    "Qwen/Qwen2.5-Coder-0.5B-Instruct": dict(
-        weights_mib=469, n_layers=24, n_kv_heads=2, head_dim=64, note="código (mínimo)"),
-    # Qwen2.5 — geral
-    "Qwen/Qwen2.5-3B-Instruct": dict(
-        weights_mib=2007, n_layers=36, n_kv_heads=2, head_dim=128, note="geral"),
-    "Qwen/Qwen2.5-1.5B-Instruct": dict(
-        weights_mib=1408, n_layers=28, n_kv_heads=2, head_dim=128, note="geral"),
-    "Qwen/Qwen2.5-0.5B-Instruct": dict(
-        weights_mib=469, n_layers=24, n_kv_heads=2, head_dim=64, note="geral (mínimo)"),
-    # Llama 3.x — geral
-    "meta-llama/Llama-3.1-8B-Instruct": dict(
-        weights_mib=4693, n_layers=32, n_kv_heads=8, head_dim=128, ctx_cap=16384,
-        note="geral (grande, ctx≤16384 na iGPU)"),
-    "meta-llama/Llama-3.2-3B-Instruct": dict(
-        weights_mib=1926, n_layers=28, n_kv_heads=8, head_dim=128, note="geral"),
-    "meta-llama/Llama-3.2-1B-Instruct": dict(
-        weights_mib=1277, n_layers=16, n_kv_heads=8, head_dim=64, note="geral (leve)"),
-}
-
-# Margem fixa para buffers de compute/contexto do runtime, além de pesos + KV.
-RUNTIME_OVERHEAD_MIB = 512
-
-
-def available_mib() -> float:
-    """Memória disponível (MiB). Na iGPU Arc (UMA) a VRAM sai da RAM do sistema."""
-    try:
-        import psutil
-        return psutil.virtual_memory().available / 1024 ** 2
-    except Exception:
-        try:
-            with open("/proc/meminfo") as fh:
-                for line in fh:
-                    if line.startswith("MemAvailable:"):
-                        return int(line.split()[1]) / 1024  # kB → MiB
-        except Exception:
-            pass
-    return float("inf")  # sem informação: não filtra
-
-
-def kv_cache_mib(spec: dict, n_ctx: int) -> float:
-    """KV-cache estimada (MiB) para n_ctx tokens, em fp16 (2 bytes), K e V."""
-    bytes_per_token = 2 * spec["n_layers"] * spec["n_kv_heads"] * spec["head_dim"] * 2
-    return bytes_per_token * n_ctx / 1024 ** 2
-
-
-def estimate_mib(spec: dict, n_ctx: int) -> float:
-    """Memória total estimada (MiB): pesos + KV-cache + overhead do runtime."""
-    return spec["weights_mib"] + kv_cache_mib(spec, n_ctx) + RUNTIME_OVERHEAD_MIB
-
-
-def select_model_interactively(plan_ctx: int) -> str:
-    """Mostra os modelos que cabem na memória e pede ao utilizador para escolher.
-
-    plan_ctx é o contexto usado para dimensionar a KV-cache (pior caso = --max-ctx).
-    """
-    budget = available_mib()
-    safe_budget = budget * 0.90  # margem de segurança
-
-    rows = []
-    for model_id, spec in SERVE_CATALOG.items():
-        need = estimate_mib(spec, plan_ctx)
-        rows.append((model_id, spec, need, need <= safe_budget))
-
-    fitting = [r for r in rows if r[3]]
-
-    print("== serve-llama: escolher modelo ==")
-    print(f"Memória disponível : {budget/1024:.1f} GiB  "
-          f"(orçamento seguro {safe_budget/1024:.1f} GiB)")
-    print(f"Contexto p/ estimativa: {plan_ctx} tokens")
-    print()
-    print("  #  Modelo                              Pesos    +KV      Total   Cabe  Notas")
-    print("  -  ----------------------------------  -------  -------  -------  ----  -----")
-    index_map: dict[int, str] = {}
-    recommended_idx: int | None = None
-    n = 0
-    for model_id, spec, need, fits in rows:
-        star = " ★" if model_id == RECOMMENDED_MODEL else ""
-        if fits:
-            n += 1
-            index_map[n] = model_id
-            label = f"{n:>2}"
-            if model_id == RECOMMENDED_MODEL:
-                recommended_idx = n
-        else:
-            label = " ✗"
-        note = spec.get("note", "")
-        if model_id == RECOMMENDED_MODEL:
-            note = f"{note} — recomendado p/ opencode".strip(" —")
-        print(f"  {label}  {model_id + star:<34}  "
-              f"{spec['weights_mib']:>5} MB  "
-              f"{kv_cache_mib(spec, plan_ctx):>5.0f} MB  "
-              f"{need:>5.0f} MB  {'sim' if fits else 'NÃO':<4}  {note}")
-    print()
-
-    if not fitting:
-        raise SystemExit(
-            "Nenhum modelo do catálogo cabe na memória disponível "
-            f"({budget/1024:.1f} GiB). Liberta memória ou reduz SERVE_MAX_CTX."
-        )
-
-    # Default = modelo recomendado se couber, senão o maior que cabe (mais capaz).
-    default = recommended_idx if recommended_idx is not None else \
-        max(index_map, key=lambda i: estimate_mib(SERVE_CATALOG[index_map[i]], plan_ctx))
-
-    if not sys.stdin.isatty():
-        # Sem terminal interactivo (ex: pipe/CI): usa o default (recomendado se couber).
-        choice = index_map[default]
-        print(f"(stdin não interactivo — escolhido automaticamente: {choice})")
-        return choice
-
-    star = " ★" if index_map[default] == RECOMMENDED_MODEL else ""
-    while True:
-        raw = input(f"Escolhe um modelo [1-{n}] (Enter = {default}{star}): ").strip()
-        if raw == "":
-            return index_map[default]
-        if raw.isdigit() and int(raw) in index_map:
-            return index_map[int(raw)]
-        print(f"  Opção inválida: '{raw}'. Indica um número entre 1 e {n}.")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Servidor OpenAI-compatível (llama.cpp / SYCL / Intel Arc GPU)"
@@ -639,27 +483,8 @@ def main() -> None:
     size_mb = gguf_path.stat().st_size / 1024 ** 2
     print(f"Ficheiro: {gguf_path.name} ({size_mb:.0f} MB)")
 
-    if args.n_ctx > 0:
-        n_ctx = args.n_ctx
-        print(f"Contexto: {n_ctx} (definido manualmente)")
-    else:
-        # Tecto efectivo: o pedido (--max-ctx) e, se o modelo tiver um limite
-        # próprio na iGPU (ctx_cap, ex: 7B/8B), o mais baixo dos dois.
-        model_cap = SERVE_CATALOG.get(model_id, {}).get("ctx_cap")
-        cap = args.max_ctx if model_cap is None else min(args.max_ctx, model_cap)
-        trained = get_n_ctx_train(gguf_path)
-        if trained:
-            n_ctx = min(trained, cap)
-            if n_ctx < trained:
-                reason = "--max-ctx" if cap == args.max_ctx else "limite da iGPU p/ este modelo"
-                capped = f" (limitado por {reason})"
-            else:
-                capped = ""
-            print(f"Contexto: {n_ctx} (auto: treino={trained}{capped})")
-        else:
-            n_ctx = cap
-            print(f"Contexto: {n_ctx} (auto: contexto de treino "
-                  f"indisponível, a usar tecto {cap})")
+    n_ctx, ctx_msg = resolve_ctx(model_id, gguf_path, args.n_ctx, args.max_ctx)
+    print(f"Contexto: {ctx_msg}")
 
     print(f"Alias   : {alias}")
 
