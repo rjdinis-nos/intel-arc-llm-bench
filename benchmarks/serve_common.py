@@ -114,7 +114,7 @@ def opencode_config(base_url: str = "http://127.0.0.1:8080/v1",
     }
 
 
-
+def get_n_ctx_train(gguf_path) -> int | None:
     """Lê o contexto de treino (`*.context_length`) dos metadados do GGUF.
 
     Devolve None se não for possível (gguf não instalado ou chave ausente).
