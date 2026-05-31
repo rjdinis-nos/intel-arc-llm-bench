@@ -6,13 +6,14 @@ to serve GGUF models to **opencode** on the Intel Arc GPU. Start it with
 
 Contents:
 - [1. How to start](#1-how-to-start)
-- [2. Configuration](#2-configuration)
-- [3. Variables and flags](#3-variables-and-flags)
-- [4. Reading the logs](#4-reading-the-logs)
-- [5. Performance metrics (prefill vs decode)](#5-performance-metrics-prefill-vs-decode)
-- [6. Hardware comparison (this iGPU vs Apple Silicon)](#6-hardware-comparison-this-igpu-vs-apple-silicon)
-- [7. Common warnings (and whether they matter)](#7-common-warnings-and-whether-they-matter)
-- [8. Troubleshooting](#8-troubleshooting)
+- [2. Model catalogue](#2-model-catalogue)
+- [3. Configuration](#3-configuration)
+- [4. Variables and flags](#4-variables-and-flags)
+- [5. Reading the logs](#5-reading-the-logs)
+- [6. Performance metrics (prefill vs decode)](#6-performance-metrics-prefill-vs-decode)
+- [7. Hardware comparison (this iGPU vs Apple Silicon)](#7-hardware-comparison-this-igpu-vs-apple-silicon)
+- [8. Common warnings (and whether they matter)](#8-common-warnings-and-whether-they-matter)
+- [9. Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -35,7 +36,45 @@ parser does not recover, so tool-calling fails with them.
 
 ---
 
-## 2. Configuration
+## 2. Model catalogue
+
+Models this server knows how to serve (`SERVE_CATALOG` in
+`benchmarks/serve_common.py`). **Served ctx (Arc)** = what this repo actually
+exposes to opencode on the iGPU (`ctx_cap` if set, otherwise the `SERVE_MAX_CTX`
+auto-cap of 32768); **Train ctx** = the model's native `n_ctx_train` ceiling. You
+can override the served value with `SERVE_NCTX` (a restart is required — `n_ctx`
+is fixed for a server's lifetime).
+
+| Model | Params | Weights (Q4_K_M) | Layers | KV heads | Head dim | Served ctx (Arc) | Train ctx | Note |
+|---|---|---|---|---|---|---|---|---|
+| Qwen2.5-3B-Instruct ★ | 3B | ~2.0 GB | 36 | 2 | 128 | **32768** | 32768 | general, recommended for opencode |
+| Qwen2.5-1.5B-Instruct | 1.5B | ~1.4 GB | 28 | 2 | 128 | 32768 | 32768 | general |
+| Qwen2.5-0.5B-Instruct | 0.5B | ~0.46 GB | 24 | 2 | 64 | 32768 | 32768 | general (minimal) |
+| Qwen2.5-Coder-7B-Instruct | 7B | ~4.4 GB | 28 | 4 | 128 | **16384** | 32768 | code; no tool-calling (```json) |
+| Qwen2.5-Coder-3B-Instruct | 3B | ~2.0 GB | 36 | 2 | 128 | 32768 | 32768 | code; no tool-calling |
+| Qwen2.5-Coder-1.5B-Instruct | 1.5B | ~1.0 GB | 28 | 2 | 128 | 32768 | 32768 | code (light) |
+| Qwen2.5-Coder-0.5B-Instruct | 0.5B | ~0.46 GB | 24 | 2 | 64 | 32768 | 32768 | code (minimal) |
+| Llama-3.1-8B-Instruct | 8B | ~4.6 GB | 32 | 8 | 128 | **16384** | 131072 | general (large; capped for iGPU) |
+| Llama-3.2-3B-Instruct | 3B | ~1.9 GB | 28 | 8 | 128 | 32768 | 131072 | general |
+| Llama-3.2-1B-Instruct | 1B | ~1.25 GB | 16 | 8 | 64 | 32768 | 131072 | general (light) |
+
+Notes:
+- **Served ctx < Train ctx** when a model is capped to fit the iGPU's KV-cache
+  budget: Coder-7B and Llama-3.1-8B carry an explicit `ctx_cap=16384`, and the
+  Llama-3.2 models (native 131072) are limited by the `SERVE_MAX_CTX=32768`
+  auto-cap.
+- **KV heads × head dim** drives KV-cache size per token — Llama's 8 KV-heads make
+  its cache ~4× heavier per token than Qwen's 2, which is why the 8B is capped
+  lower.
+- ★ = recommended. Only general Qwen2.5 models emit native `<tool_call>` tags that
+  the `peg-native` parser extracts; the **Coder** variants fence calls in
+  ```` ```json ```` and break tool-calling (see §1).
+- Weights are GGUF **Q4_K_M** sizes; the picker also estimates KV-cache from the
+  architecture columns to decide what fits in available memory before downloading.
+
+---
+
+## 3. Configuration
 
 `make serve-llama` `exec`s the binary with (see
 `benchmarks/serve_llama_native.py`):
@@ -68,7 +107,7 @@ What each flag does:
 
 ---
 
-## 3. Variables and flags
+## 4. Variables and flags
 
 `make` variables (override on the command line, e.g.
 `make serve-llama SERVE_PORT=9000`):
@@ -97,7 +136,7 @@ Relevant environment variables:
 
 ---
 
-## 4. Reading the logs
+## 5. Reading the logs
 
 Timestamps use the format `H.MM.SSS.mmm` (time since process start). The log has
 three phases.
@@ -160,8 +199,8 @@ Each request is a **task** on slot 0.
 
 - **`Chat format: peg-native`:** the tool-call parser in use (only reads
   `<tool_call>` tags).
-- **`prompt eval time`:** **prefill** — see §5.
-- **`eval time`:** **decode** — see §5.
+- **`prompt eval time`:** **prefill** — see §6.
+- **`eval time`:** **decode** — see §6.
 - **`total time`:** prefill + decode.
 - **`graphs reused`:** compute graphs reused from cache (lower latency).
 - **`truncated = 0`:** the context fit in the window; **nothing was cut** (critical
@@ -188,7 +227,7 @@ Each request is a **task** on slot 0.
 
 ---
 
-## 5. Performance metrics (prefill vs decode)
+## 6. Performance metrics (prefill vs decode)
 
 `llama-server` reports **two** distinct rates — don't conflate them:
 
@@ -211,7 +250,7 @@ Each request is a **task** on slot 0.
 
 ---
 
-## 6. Hardware comparison (this iGPU vs Apple Silicon)
+## 7. Hardware comparison (this iGPU vs Apple Silicon)
 
 Decode ("typing speed") is **memory-bandwidth-bound**, so it scales roughly with a
 machine's memory bandwidth. The table compares this repo's Intel Arc iGPU with the
@@ -241,7 +280,7 @@ Notes:
 
 ---
 
-## 7. Common warnings (and whether they matter)
+## 8. Common warnings (and whether they matter)
 
 | Log line | Matters? | Explanation |
 |---|---|---|
@@ -253,7 +292,7 @@ Notes:
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
