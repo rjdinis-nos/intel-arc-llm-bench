@@ -1,0 +1,12 @@
+# GPU override for NATIVE Linux hosts (Intel Arc with /dev/dri).
+# Used automatically by the Makefile when /dev/dri exists.
+#   docker compose -f docker-compose.yml -f docker-compose.dri.yml up -d
+services:
+  vllm:
+    devices:
+      - /dev/dri:/dev/dri
+    # Render/video groups own the DRI render nodes on most distros.
+    # Override GIDs if your host differs: `RENDER_GID=... VIDEO_GID=... make start`.
+    group_add:
+      - "${RENDER_GID:-render}"
+      - "${VIDEO_GID:-video}"

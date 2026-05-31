@@ -1,0 +1,34 @@
+# GPU override for WSL2 hosts (Intel Arc exposed via /dev/dxg).
+# Used automatically by the Makefile when running under WSL2.
+#   docker compose -f docker-compose.yml -f docker-compose.wsl.yml up -d
+#
+# NOTE: Intel GPU compute inside WSL2 needs a recent Intel Arc Windows driver
+# (validated with 32.0.101.8801). This override wires up the WSL paravirtual GPU:
+# the /dev/dxg device, the WSL runtime libs, AND the host driver store
+# (/usr/lib/wsl/drivers) which holds the Intel Level-Zero GPU driver the guest
+# NEO runtime loads via libdxcore. Without the driver-store mount the GPU is
+# invisible and vLLM fails with "Failed to infer device type".
+services:
+  vllm:
+    devices:
+      - /dev/dxg:/dev/dxg
+    volumes:
+      # WSL runtime libraries (libd3d12, libdxcore, ...) needed by the GPU runtime.
+      - /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro
+      # Host Windows driver store — provides the Intel GPU Level-Zero driver
+      # (ze_intel_gpu64.dll) that the guest NEO runtime reaches through dxcore.
+      # This mount is REQUIRED for the Arc GPU to be visible inside the container.
+      - /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro
+      # WSL2 patch: torch.xpu.mem_get_info() isn't implemented by the WSL GPU
+      # driver, so vLLM's startup memory snapshot crashes ("Engine core
+      # initialization failed"). sitecustomize.py wraps it with a fallback.
+      - ./patches:/opt/patches:ro
+    environment:
+      # Auto-load the WSL mem_get_info patch (sitecustomize runs at interpreter
+      # startup, including the spawned engine-core subprocesses).
+      - PYTHONPATH=/opt/patches
+      # Prepend the WSL paravirtual GPU libs, but KEEP the image's oneAPI
+      # library paths — otherwise torch fails with "libccl.so.1: cannot open
+      # shared object file" because compose env vars REPLACE (not append to)
+      # the image's LD_LIBRARY_PATH.
+      - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/intel/oneapi/tcm/1.4/lib:/opt/intel/oneapi/umf/1.0/lib:/opt/intel/oneapi/tbb/2022.3/env/../lib/intel64/gcc4.8:/opt/intel/oneapi/pti/0.16/lib:/opt/intel/oneapi/mpi/2021.17/opt/mpi/libfabric/lib:/opt/intel/oneapi/mpi/2021.17/lib:/opt/intel/oneapi/mkl/2025.3/lib:/opt/intel/oneapi/dnnl/2025.3/lib:/opt/intel/oneapi/debugger/2025.3/opt/debugger/lib:/opt/intel/oneapi/compiler/2025.3/opt/compiler/lib:/opt/intel/oneapi/compiler/2025.3/lib:/opt/intel/oneapi/ccl/2021.17/lib/:/usr/local/lib/

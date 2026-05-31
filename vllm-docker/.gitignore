@@ -1,0 +1,9 @@
+# Local secrets / config
+.env
+
+# Cloned vLLM source used to build the XPU image
+.vllm-src/
+
+# Local build / editor logs
+build.log
+nvim.log
