@@ -1,0 +1,7 @@
+model,dtype,new_tokens,device,ttft_ms,prefill_tps,decode_tps,overall_tps,model_mem_mb,error,prompt_tokens
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,48.5,660.32,25.52,25.48,950.0,,32
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,40.9,1563.12,29.18,29.14,950.0,,64
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,55.6,2327.6,26.39,26.3,950.0,,128
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,66.2,3867.58,27.28,27.11,950.0,,256
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,91.4,5608.03,24.81,24.57,950.0,,512
+Qwen/Qwen2.5-0.5B-Instruct,bfloat16,128,xpu,163.0,6281.9,21.38,20.97,950.0,,1024

@@ -10,9 +10,16 @@ Built from vLLM's official `Dockerfile.xpu` (`vllm-openai` target).
 ## Requirements
 
 - Docker + Docker Compose v2
-- Intel Arc GPU (Xe / Xe2). On **native Linux** the GPU is `/dev/dri`; on
-  **WSL2** it's `/dev/dxg` + `/usr/lib/wsl/lib` (auto-detected by the Makefile).
+- Intel Arc GPU (Xe-LPG / Xe2 / Xe3). On **native Linux** the GPU is `/dev/dri`;
+  on **WSL2** it's `/dev/dxg` + `/usr/lib/wsl/lib` (auto-detected by the Makefile).
 - ~30+ min and several GB of disk for the one-time image build.
+
+> ℹ️ **Attention backend:** the compose file passes `--attention-backend
+> TRITON_ATTN` (`ATTENTION_BACKEND` in `.env`). Xe-LPG iGPUs (Arc 140T /
+> Arrow Lake) are **not** supported by vLLM's default FlashAttention XPU kernel,
+> which only works on Xe2/Xe3 discrete GPUs and otherwise crashes with
+> "Only XE2/XE3 cutlass kernel is supported". The `VLLM_ATTENTION_BACKEND` env
+> var was removed in v0.22.0, so this is now a `vllm serve` CLI flag.
 
 > ⚠️ **WSL2 caveat:** Intel GPU compute inside WSL2 is unreliable (see
 > [../SETUP.md](../SETUP.md) — llama.cpp GPU did not work in WSL2). If the server
@@ -45,6 +52,13 @@ make logs             # watch startup (model download + XPU warmup take minutes)
 ```bash
 make health           # health check + list models
 make test             # sample chat completion
+make gpu-check        # verify the Intel XPU is visible inside the image
+```
+
+Or run the Python client (needs `openai`; reads `MODEL_NAME`/`VLLM_PORT`):
+
+```bash
+python client_example.py
 ```
 
 Or with curl:
@@ -59,18 +73,22 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### 5. Connect Copilot CLI
+### 5. Connect a client
 
-Point Copilot CLI at the OpenAI-compatible endpoint:
+Point any OpenAI-compatible client (Copilot CLI, OpenCode, ...) at the endpoint:
 
 ```
 http://localhost:8000/v1/
 ```
 
+Tool calling is enabled (`--enable-auto-tool-choice --tool-call-parser hermes`),
+so agentic clients that need function calling work out of the box.
+
 ## Make Targets
 
 ```bash
 make build      # build the vLLM XPU image from source (one-time, slow)
+make gpu-check  # verify the Intel XPU is visible inside the image
 make start      # start the server (auto WSL2 vs native /dev/dri)
 make stop       # stop the server
 make restart    # restart the server
@@ -96,6 +114,8 @@ make start MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
 | `MODEL_NAME` | `Qwen/Qwen2.5-0.5B-Instruct` | HuggingFace model ID |
 | `DTYPE` | `bfloat16` | `bfloat16` (recommended on Arc), `float16`, `float32` |
 | `MAX_MODEL_LEN` | `2048` | Context window (lower if OOM) |
+| `ATTENTION_BACKEND` | `TRITON_ATTN` | `vllm serve` attention backend (required on Xe-LPG iGPUs) |
+| `TOOL_CALL_PARSER` | `hermes` | Tool-call parser for function calling (`hermes` fits Qwen2.5) |
 | `VLLM_PORT` | `8000` | Host port |
 | `GPU_MEMORY_UTILIZATION` | `0.9` | Fraction of GPU memory vLLM reserves |
 | `TENSOR_PARALLEL_SIZE` | `1` | GPUs for tensor parallelism |
@@ -105,6 +125,11 @@ make start MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
 | `VLLM_IMAGE` | `vllm-xpu:v0.22.0` | Built image tag used by compose |
 | `HUGGING_FACE_HUB_TOKEN` | _(empty)_ | Token for gated models (Llama, ...) |
 
+> ⚠️ **Shared-memory iGPU OOM:** the Arc 140T is a UMA iGPU with no dedicated
+> VRAM — the driver reports the full shared system-RAM pool as "GPU memory", so a
+> high `GPU_MEMORY_UTILIZATION` overcommits and triggers "XPU out of memory" at
+> KV-cache allocation. Keep it conservative (e.g. `0.5`) on iGPUs.
+
 ## How GPU passthrough is wired
 
 `make` composes the base file with one GPU override:
@@ -112,7 +137,11 @@ make start MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
 - **Native Linux** → `docker-compose.dri.yml` (passes `/dev/dri`, adds
   `render`/`video` groups).
 - **WSL2** → `docker-compose.wsl.yml` (passes `/dev/dxg`, mounts
-  `/usr/lib/wsl/lib`, sets `LD_LIBRARY_PATH`).
+  `/usr/lib/wsl/lib` **and** the host driver store `/usr/lib/wsl/drivers`,
+  prepends the WSL libs to the image's oneAPI `LD_LIBRARY_PATH`, and mounts
+  `./patches` — a `sitecustomize.py` shim that wraps `torch.xpu.mem_get_info()`,
+  which the WSL GPU driver doesn't implement and which otherwise crashes engine
+  startup).
 
 To run manually:
 
@@ -139,10 +168,14 @@ TinyLlama/TinyLlama-1.1B-Chat-v1.0
 the XPU; `start_period` is 5 min. Watch `make logs`.
 
 **XPU not found / falls back or crashes (WSL2)** — known WSL2 limitation; try a
-native Linux host. Verify on the host with the repo's `make test-gpu`.
+native Linux host. Verify the GPU is visible inside the image with `make
+gpu-check` (expects `xpu available: True`), or on the host with `make test-gpu`.
+
+**"Only XE2/XE3 cutlass kernel is supported"** — the default FlashAttention XPU
+kernel doesn't support Xe-LPG iGPUs. Keep `ATTENTION_BACKEND=TRITON_ATTN`.
 
 **Out of memory** — lower `MAX_MODEL_LEN`, lower `GPU_MEMORY_UTILIZATION`
-(e.g. 0.7), or use a smaller model.
+(e.g. 0.5 on a shared-memory iGPU), or use a smaller model.
 
 **Gated model 401** — set `HUGGING_FACE_HUB_TOKEN` in `.env`.
 

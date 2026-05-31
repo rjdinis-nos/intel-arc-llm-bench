@@ -71,9 +71,19 @@ class RunResult:
         return self.generated_tokens / max(self.total_s, 1e-9)
 
 
-def run_once(model, tokenizer, device: str, prompt: str, new_tokens: int) -> RunResult:
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    prompt_tokens = inputs.input_ids.shape[-1]
+def run_once(
+    model,
+    tokenizer,
+    device: str,
+    prompt: str,
+    new_tokens: int,
+    prebuilt_inputs: dict | None = None,
+) -> RunResult:
+    if prebuilt_inputs is not None:
+        inputs = prebuilt_inputs
+    else:
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    prompt_tokens = inputs["input_ids"].shape[-1]
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     gen_kwargs = dict(
@@ -83,6 +93,9 @@ def run_once(model, tokenizer, device: str, prompt: str, new_tokens: int) -> Run
         streamer=streamer,
         pad_token_id=tokenizer.eos_token_id,
     )
+    if prebuilt_inputs is not None:
+        # Forçar geração completa com prompt sintético (evita EOS prematuro)
+        gen_kwargs["min_new_tokens"] = new_tokens
 
     sync(device)
     t_start = time.perf_counter()
@@ -124,6 +137,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark tokens/s de um LLM local")
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=None,
+        help="usar prompt sintético com exactamente N tokens (ignora --prompt e chat template)",
+    )
     parser.add_argument("--new-tokens", type=int, default=256)
     parser.add_argument("--runs", type=int, default=3, help="número de execuções medidas")
     parser.add_argument("--warmup", type=int, default=1, help="execuções de warmup (não contabilizadas)")
@@ -140,6 +159,8 @@ def main() -> None:
     print(f"Dtype  : {args.dtype}")
     print(f"Runs   : {args.runs} (warmup={args.warmup})")
     print(f"Tokens : max_new_tokens={args.new_tokens}")
+    if args.prompt_tokens:
+        print(f"Prompt : sintético ({args.prompt_tokens} tokens) — chat template ignorado")
     print()
 
     print("A carregar tokenizer e modelo...")
@@ -147,28 +168,45 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(device)
     model.eval()
+    sync(device)
+    if device == "xpu":
+        model_mem_mb: float | None = torch.xpu.memory_allocated() / 1024**2
+    elif device == "cuda":
+        model_mem_mb = torch.cuda.memory_allocated() / 1024**2
+    else:
+        model_mem_mb = None
     print(f"Carregado em {time.perf_counter() - t0:.2f}s\n")
 
-    # Aplica chat template se disponível
-    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": args.prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+    # Prompt: sintético (N tokens exactos) ou natural com chat template
+    if args.prompt_tokens:
+        _vocab = tokenizer.vocab_size
+        _ids = torch.randint(100, min(_vocab - 100, 50000), (1, args.prompt_tokens), dtype=torch.long)
+        synthetic_inputs: dict | None = {
+            "input_ids": _ids.to(device),
+            "attention_mask": torch.ones(1, args.prompt_tokens, dtype=torch.long, device=device),
+        }
+        prompt = ""  # não usado quando synthetic_inputs está definido
     else:
-        prompt = args.prompt
+        synthetic_inputs = None
+        if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": args.prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            prompt = args.prompt
 
     with torch.inference_mode():
         for i in range(args.warmup):
             print(f"[warmup {i+1}/{args.warmup}] ", end="", flush=True)
-            r = run_once(model, tokenizer, device, prompt, args.new_tokens)
+            r = run_once(model, tokenizer, device, prompt, args.new_tokens, prebuilt_inputs=synthetic_inputs)
             print(fmt(r))
 
         results: list[RunResult] = []
         for i in range(args.runs):
             print(f"[run    {i+1}/{args.runs}] ", end="", flush=True)
-            r = run_once(model, tokenizer, device, prompt, args.new_tokens)
+            r = run_once(model, tokenizer, device, prompt, args.new_tokens, prebuilt_inputs=synthetic_inputs)
             results.append(r)
             print(fmt(r))
 
@@ -180,10 +218,13 @@ def main() -> None:
         avg_ttft = sum(r.ttft_s for r in results) / n
         print()
         print(f"== Médias ({n} runs) ==")
+        print(f"Prompt tokens : {results[0].prompt_tokens}")
         print(f"TTFT médio   : {avg_ttft*1000:.1f} ms")
         print(f"Prefill t/s  : {avg_prefill:.2f}")
         print(f"Decode  t/s  : {avg_decode:.2f}")
         print(f"Overall t/s  : {avg_overall:.2f}")
+        if model_mem_mb is not None:
+            print(f"Model mem ({device}) : {model_mem_mb:.0f} MB")
 
     del model
     gc.collect()

@@ -14,6 +14,17 @@
 
 PY := .venv/bin/python
 
+# Source the Intel oneAPI runtime (DPC++/MKL/SYCL) for the SYCL llama.cpp build
+# and at runtime. Override ONEAPI_ENV if your toolkit lives elsewhere.
+# setvars.sh forces SYCL_CACHE_PERSISTENT=1, but the oneAPI 2026.0 persistent
+# device-code (JIT) cache segfaults on the Arc 140T (Xe-LPG) iGPU during
+# inference, so we disable it after sourcing.
+ONEAPI_ENV ?= /opt/intel/oneapi/setvars.sh
+SYCL_ENV   := $(if $(wildcard $(ONEAPI_ENV)),. $(ONEAPI_ENV) >/dev/null 2>&1; export SYCL_CACHE_PERSISTENT=0;,)
+
+# setvars.sh is a bash script; use bash so sourcing it works in recipes.
+SHELL := /bin/bash
+
 # Permite override: make bench MODEL=... NEW_TOKENS=... RUNS=...
 MODEL      ?= Qwen/Qwen2.5-0.5B-Instruct
 NEW_TOKENS ?= 128
@@ -21,9 +32,18 @@ RUNS       ?= 3
 WARMUP     ?= 1
 DTYPE      ?= bfloat16
 DEVICE     ?= xpu
+PROMPT_TOKENS ?=          # vazio = prompt natural; ex: 64,256,1024 para sweep de KV-cache
+LLAMA_QUANT ?= q4_k_m
+SERVE_HOST  ?= 127.0.0.1
+SERVE_PORT  ?= 8080
+SERVE_MODEL ?=           # vazio = perguntar interactivamente (só modelos que cabem na memória)
+SERVE_NCTX  ?= 0          # 0 = automático (contexto de treino do modelo, limitado por SERVE_MAX_CTX)
+SERVE_MAX_CTX ?= 32768    # tecto global do modo automático (modelos grandes têm limite próprio mais baixo na iGPU)
 
 .PHONY: help bench bench-quick sweep sweep-quick tokenizer check \
-        test test-gpu test-hf test-chat all clean
+        test test-gpu test-hf test-chat all clean \
+        setup-llama bench-llama bench-llama-quick sweep-llama sweep-llama-quick \
+        serve-llama
 
 help:
 	@echo "Targets disponíveis:"
@@ -40,20 +60,34 @@ help:
 	@echo "  make all           — check + bench + sweep + tokenizer"
 	@echo "  make clean         — limpa caches e resultados"
 	@echo ""
-	@echo "Variáveis: MODEL DTYPE NEW_TOKENS RUNS WARMUP DEVICE"
+	@echo "── llama.cpp (motor alternativo, GGUF quantizado — setup pontual) ──"
+	@echo "  Não vem com 'uv sync': não há wheel GPU pré-built, o build SYCL"
+	@echo "  é compilado a partir do código (oneAPI). Corre o setup UMA vez:"
+	@echo "  make setup-llama        — compila p/ Intel Arc GPU (SYCL, requer oneAPI)"
+	@echo "  make bench-llama        — benchmark llama.cpp ($(MODEL), quant=$(LLAMA_QUANT))"
+	@echo "  make bench-llama-quick  — benchmark llama.cpp rápido (1 run, 64 tokens)"
+	@echo "  make sweep-llama        — sweep llama.cpp (modelos × quants × sizes)"
+	@echo "  make sweep-llama-quick  — sweep llama.cpp smoke test"
+	@echo "  make serve-llama        — servidor OpenAI-compatível p/ opencode (escolhe modelo)"
+	@echo ""
+	@echo "Variáveis: MODEL DTYPE NEW_TOKENS RUNS WARMUP DEVICE PROMPT_TOKENS LLAMA_QUANT"
+	@echo "  PROMPT_TOKENS=64,256,1024  — adiciona sweep sobre tamanho do prompt/KV-cache"
+	@echo "  SERVE_HOST=127.0.0.1 SERVE_PORT=8080  — endereço do serve-llama"
+	@echo "  SERVE_MODEL=...  — modelo a servir (vazio = menu interactivo dos que cabem)"
+	@echo "  SERVE_NCTX=0  — contexto do serve-llama (0=auto pelo modelo, limite SERVE_MAX_CTX)"
 
 bench:
 	$(PY) benchmarks/benchmark_tps.py \
 		--model $(MODEL) --dtype $(DTYPE) \
 		--new-tokens $(NEW_TOKENS) --runs $(RUNS) --warmup $(WARMUP) \
-		--device $(DEVICE)
+		--device $(DEVICE)$(if $(PROMPT_TOKENS), --prompt-tokens $(PROMPT_TOKENS),)
 
 bench-quick:
 	$(PY) benchmarks/benchmark_tps.py \
 		--model $(MODEL) --new-tokens 64 --runs 1 --warmup 1
 
 sweep:
-	$(PY) benchmarks/bench_sweep.py
+	$(PY) benchmarks/bench_sweep.py$(if $(PROMPT_TOKENS), --prompt-tokens $(PROMPT_TOKENS),)
 
 sweep-quick:
 	$(PY) benchmarks/bench_sweep.py --quick
@@ -79,5 +113,51 @@ all: check bench sweep tokenizer
 
 clean:
 	@find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} + 2>/dev/null || true
-	@rm -f results/bench_results.md results/bench_results.csv results/tokenizer_results.md
+	@rm -f results/bench_results.md results/bench_results.csv results/tokenizer_results.md results/llama_results.md results/llama_results.csv
 	@echo "✔  Limpeza concluída."
+
+# ── llama.cpp (motor opcional) ──────────────────────────────────────────────
+# Setup pontual: llama-cpp-python não está no pyproject (não há wheel GPU
+# pré-built), por isso compila-se à parte com o backend SYCL para a Arc GPU
+# (precisa do Intel oneAPI: DPC++ + MKL).
+
+setup-llama:
+	@if [ ! -f "$(ONEAPI_ENV)" ]; then \
+		echo "✗ Intel oneAPI não encontrado em $(ONEAPI_ENV)."; \
+		echo "  Instala o Intel oneAPI Base Toolkit (DPC++ + MKL) ou define"; \
+		echo "  ONEAPI_ENV=/caminho/para/setvars.sh."; \
+		exit 1; \
+	fi
+	@echo "A compilar llama-cpp-python com backend SYCL (Intel Arc GPU)..."
+	$(SYCL_ENV) \
+	CMAKE_ARGS="-DGGML_SYCL=on -DGGML_SYCL_TARGET=INTEL -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx" \
+		uv pip install llama-cpp-python --force-reinstall --no-cache-dir
+	@echo "A instalar extras do servidor (para 'make serve-llama')..."
+	uv pip install "uvicorn>=0.22.0" "fastapi>=0.100.0" "pydantic-settings>=2.0.1" \
+		"sse-starlette>=1.6.1" "starlette-context>=0.3.6,<0.4" "PyYAML>=5.1" "gguf>=0.10.0"
+	@echo "✔  llama-cpp-python instalado (SYCL/GPU)."
+
+bench-llama:
+	$(SYCL_ENV) $(PY) benchmarks/benchmark_llama.py \
+		--model $(MODEL) --quant $(LLAMA_QUANT) \
+		--new-tokens $(NEW_TOKENS) --runs $(RUNS) --warmup $(WARMUP)
+
+bench-llama-quick:
+	$(SYCL_ENV) $(PY) benchmarks/benchmark_llama.py \
+		--model $(MODEL) --quant $(LLAMA_QUANT) \
+		--new-tokens 64 --runs 1 --warmup 1
+
+sweep-llama:
+	$(SYCL_ENV) $(PY) benchmarks/bench_llama_sweep.py
+
+sweep-llama-quick:
+	$(SYCL_ENV) $(PY) benchmarks/bench_llama_sweep.py --quick
+
+# Servidor OpenAI-compatível na GPU para o opencode (ou qualquer cliente OpenAI).
+# Endpoint: http://$(SERVE_HOST):$(SERVE_PORT)/v1  (apiKey ignorada).
+serve-llama:
+	$(SYCL_ENV) $(PY) benchmarks/serve_llama.py \
+		$(if $(SERVE_MODEL),--model $(SERVE_MODEL),) --quant $(LLAMA_QUANT) \
+		--host $(SERVE_HOST) --port $(SERVE_PORT) \
+		--n-ctx $(SERVE_NCTX) --max-ctx $(SERVE_MAX_CTX)
+
