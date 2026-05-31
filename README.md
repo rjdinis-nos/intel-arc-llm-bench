@@ -108,7 +108,8 @@ native parser does not recover, so tool-calling breaks with them — the launche
 prints a warning if you pick one. Use a general Qwen2.5 model for opencode.
 
 Endpoint: `http://127.0.0.1:8080/v1` (the API key is not validated). See
-[SETUP.md](SETUP.md#2-llamacpp--gpu-sycl) for the `opencode.json` provider config.
+[SETUP.md](SETUP.md#2-llamacpp--gpu-sycl) for the `opencode.json` provider config,
+and [LLAMA_SERVER.md](LLAMA_SERVER.md) for the server flags and how to read its logs.
 
 
 ### Override variables
@@ -171,6 +172,7 @@ results/
 ## Documentation
 
 - [SETUP.md](SETUP.md) — installation details and findings on failed approaches (llama.cpp GPU, IPEX-LLM)
+- [LLAMA_SERVER.md](LLAMA_SERVER.md) — `llama-server` flags, configuration, and how to interpret its log output
 - [XPU_STACK.md](XPU_STACK.md) — how the XPU stack works, memory/storage sizing formulas, throughput estimation
 
 ## Notes
